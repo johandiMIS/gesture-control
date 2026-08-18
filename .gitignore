@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+models/*.task
+captures/
+.vscode/
+.idea/

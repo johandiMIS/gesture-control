@@ -1,0 +1,10 @@
+name: hand-tracking
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - mediapipe>=1.0
+      - opencv-python>=4.10
+      - numpy>=1.26
