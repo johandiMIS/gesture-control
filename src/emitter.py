@@ -78,6 +78,11 @@ IDLE_FRAME = b"I\n"
 # worth less than a responsive claw.
 MAX_BACKLOG = 24
 
+# How long a grab that could not be sent is still worth sending. The claw drops
+# where the player aimed a moment ago; firing one that has been stuck in a queue
+# for longer than this would drop it into an empty cabinet.
+GRAB_TTL = 2.0
+
 
 def _frame(kind, x, y):
     xi = min(POS_SCALE, max(0, int(round(x * POS_SCALE))))
@@ -95,10 +100,14 @@ class SerialEmitter:
     """
 
     def __init__(self, port, baud=9600, rate=20.0, heartbeat=0.25,
-                 deadband=0.001, ready_timeout=3.0, reset=True, verbose=False):
+                 deadband=0.001, ready_timeout=3.0, reset=True, verbose=False,
+                 clock=time.monotonic):
         import serial   # imported lazily so the rest of the app runs without it
 
         self._serial = serial
+        # Pacing is about the physical wire, so this is wall clock, not the
+        # controller's session time. Injectable so it can be driven in tests.
+        self.clock = clock
         self.port = port
         self.verbose = verbose
         self.interval = 1.0 / rate if rate > 0 else 0.0
@@ -160,16 +169,13 @@ class SerialEmitter:
         except (OSError, NotImplementedError, AttributeError):
             return False
 
-    def _write(self, payload, critical=False):
+    def _write(self, payload):
+        """Attempt one write. Queue policy is the caller's decision."""
         try:
             self.ser.write(payload)
             self.sent += len(payload)
             return True
         except self._serial.SerialTimeoutException:
-            if critical:
-                self._pending.append(payload)
-            else:
-                self.dropped += 1
             return False
         except self._serial.SerialException as exc:
             print(f"serial: write failed on {self.port}: {exc}")
@@ -188,20 +194,24 @@ class SerialEmitter:
                     print(f"  arduino: {line.strip()}")
 
     def send(self, state):
-        now = time.monotonic()
+        now = self.clock()
         self._drain_input()
 
-        # Grabs that previously failed to go out get priority over anything new.
+        # Grabs that previously failed to go out get priority over anything new,
+        # unless they have gone stale waiting.
+        self._pending = [(exp, f) for exp, f in self._pending if exp > now]
         while self._pending:
-            if not self._write(self._pending[0], critical=False):
-                return
+            if not self._write(self._pending[0][1]):
+                return          # link still blocked; try again next frame
             self._pending.pop(0)
             self._last_tx = now
 
         if state.grab:
             # Bypasses the rate limit and the backlog check - this is the one
             # message that must not be skipped.
-            self._write(_frame("G", state.x, state.y), critical=True)
+            frame = _frame("G", state.x, state.y)
+            if not self._write(frame):
+                self._pending.append((now + GRAB_TTL, frame))
             self._last_tx = now
             self._last_xy = (state.x, state.y)
             self._last_active = state.active
@@ -225,6 +235,8 @@ class SerialEmitter:
             self._last_tx = now
             self._last_xy = (state.x, state.y)
             self._last_active = state.active
+        else:
+            self.dropped += 1
 
     def close(self):
         try:

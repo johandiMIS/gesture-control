@@ -6,7 +6,9 @@ normalized 0..1 x 0..1 cabinet, and closing an open palm drops it.
 Usage:
     python src/main.py                    # default webcam, overlay only
     python src/main.py --emit stdout      # print commands
+    python src/main.py --emit serial:COM3      # drive an Arduino at 9600 baud
     python src/main.py --emit 127.0.0.1:9000   # stream JSON over UDP
+    python src/main.py --list-ports            # which serial ports exist
     python src/main.py --camera 1 --gain 7 --mapping absolute
 
 Keys:  q / Esc  quit          m  toggle mirror     f  toggle FPS overlay
@@ -27,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from claw_control import GESTURE_CLOSED, GESTURE_OPEN, ClawController
 from drawing import draw_claw_pad, draw_label, draw_openness_meter, draw_points
-from emitter import make_emitter
+from emitter import list_ports, make_emitter
 from hand_tracker import HandTracker
 
 WINDOW = "Claw Control"
@@ -62,7 +64,17 @@ def parse_args():
     p.add_argument("--grab-cooldown", type=float, default=1.2)
 
     p.add_argument("--emit", metavar="TARGET",
-                   help="stdout, or HOST:PORT to stream JSON commands over UDP")
+                   help="stdout, serial:PORT for an Arduino, or HOST:PORT to "
+                        "stream JSON commands over UDP")
+    p.add_argument("--baud", type=int, default=9600, help="serial baud rate")
+    p.add_argument("--serial-rate", type=float, default=20.0,
+                   help="max position frames per second on the serial link; "
+                        "9600 baud cannot carry many more than this")
+    p.add_argument("--no-serial-reset", action="store_true",
+                   help="keep DTR low so opening the port does not reboot the "
+                        "board (also skips the READY handshake)")
+    p.add_argument("--list-ports", action="store_true",
+                   help="list serial ports and exit")
     p.add_argument("--verbose", action="store_true", help="also log every move")
     p.add_argument("--headless", action="store_true", help="no preview window")
     return p.parse_args()
@@ -115,12 +127,23 @@ def draw_overlay(frame, state, controller, fps, show_fps):
 
 def main():
     args = parse_args()
+    if args.list_ports:
+        ports = list_ports()
+        for device, description in ports:
+            print(f"{device:10s} {description}")
+        if not ports:
+            print("No serial ports found.")
+        return
+
     mirror = not args.no_mirror
     show_fps = True
 
-    cap = open_camera(args.camera, args.width, args.height)
     controller = build_controller(args)
-    emitter = make_emitter(args.emit, args.verbose)
+    # Built before the camera: a bad port or an absent board should fail here,
+    # not after the webcam has spun up.
+    emitter = make_emitter(args.emit, args.verbose, baud=args.baud,
+                           rate=args.serial_rate, reset=not args.no_serial_reset)
+    cap = open_camera(args.camera, args.width, args.height)
 
     frame_times = deque(maxlen=30)
     start = time.perf_counter()
