@@ -38,8 +38,10 @@ WINDOW = "Claw Control"
 def parse_args():
     p = argparse.ArgumentParser(description="Hand gesture claw machine controller")
     p.add_argument("--camera", type=int, default=0, help="webcam index")
-    p.add_argument("--width", type=int, default=1280)
-    p.add_argument("--height", type=int, default=720)
+    # A Pi cannot run inference at 720p; 640x480 is plenty for hand tracking.
+    on_linux = sys.platform.startswith("linux")
+    p.add_argument("--width", type=int, default=640 if on_linux else 1280)
+    p.add_argument("--height", type=int, default=480 if on_linux else 720)
     p.add_argument("--hands", type=int, default=2,
                    help="max hands to track; >1 lets the arbiter reject bystanders")
     p.add_argument("--no-mirror", action="store_true", help="don't flip horizontally")
@@ -82,10 +84,19 @@ def parse_args():
 
 def open_camera(index, width, height):
     # CAP_DSHOW avoids the multi-second MSMF startup stall on Windows.
-    backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
+    # CAP_V4L2 is explicit on Linux/Raspberry Pi; MJPG keeps USB webcams at full
+    # frame rate, where the default raw YUYV format is bandwidth-limited.
+    if sys.platform == "win32":
+        backend = cv2.CAP_DSHOW
+    elif sys.platform.startswith("linux"):
+        backend = cv2.CAP_V4L2
+    else:
+        backend = cv2.CAP_ANY
     cap = cv2.VideoCapture(index, backend)
     if not cap.isOpened():
         raise RuntimeError(f"Could not open camera {index}")
+    if backend == cv2.CAP_V4L2:
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     return cap
